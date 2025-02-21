@@ -17,6 +17,7 @@ import {
   doc,
   getDoc,
   updateDoc,
+  where,
 } from "firebase/firestore";
 import Image from "next/image";
 
@@ -24,7 +25,8 @@ interface User {
   id: string;
   name: string;
   email: string;
-  screenTime: number;
+  weeklyTime: number;
+  totalTime: number;
 }
 
 interface SettingsModalProps {
@@ -105,13 +107,17 @@ export default function Home() {
   const [error, setError] = useState("");
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
 
+  // Add state for sorting
+  const [sortBy, setSortBy] = useState<"weekly" | "total">("weekly");
+
   useEffect(() => {
-    let leaderboardUnsubscribe = () => {};
+    let leaderboardUnsubscribe: () => void = () => {};
 
     const unsubscribe = auth.onAuthStateChanged(async (authUser) => {
       if (authUser) {
         try {
-          // Fetch user's data from Firestore
+          leaderboardUnsubscribe();
+
           const userDoc = await getDoc(doc(db, "users", authUser.uid));
           const userData = userDoc.data();
 
@@ -120,77 +126,61 @@ export default function Home() {
             name: userData?.name || authUser.displayName || "Anonymous",
           });
 
-          // Set up leaderboard listener with simplified query
-          const q = query(
-            collection(db, "screenTime"),
-            orderBy("screenTime", "desc")
-          );
+          // Get current week ID
+          const now = new Date();
+          const startOfWeek = new Date(now);
+          startOfWeek.setDate(now.getDate() - ((now.getDay() + 1) % 7));
+          startOfWeek.setHours(0, 0, 0, 0);
+          const weekId = startOfWeek.toISOString().split("T")[0];
 
-          leaderboardUnsubscribe = onSnapshot(
-            q,
-            async (snapshot) => {
-              const users: User[] = [];
+          // Set up leaderboard listener based on sort type
+          const setupLeaderboardListener = () => {
+            let q;
+            if (sortBy === "weekly") {
+              q = query(
+                collection(db, "screenTime"),
+                where("weekStart", "==", startOfWeek),
+                orderBy("weeklyTime", "asc")
+              );
+            } else {
+              q = query(collection(db, "users"), orderBy("totalTime", "asc"));
+            }
 
-              for (const docSnapshot of snapshot.docs) {
-                const data = docSnapshot.data() as {
-                  userId?: string;
-                  name?: string;
-                  screenTime: number;
-                  email: string;
-                };
-                if (data.userId) {
-                  try {
-                    const userDoc = await getDoc(doc(db, "users", data.userId));
-                    const userData = userDoc.data() as
-                      | { name?: string }
-                      | undefined;
-                    users.push({
-                      id: docSnapshot.id,
-                      name: userData?.name || data.name || "Anonymous",
-                      screenTime: data.screenTime,
-                      email: data.email,
-                    } as User);
-                  } catch (error) {
-                    console.error("Error fetching user data:", error);
-                    // Still add the entry even if we can't fetch user details
-                    users.push({
-                      id: docSnapshot.id,
-                      name: data.name || "Anonymous",
-                      screenTime: data.screenTime,
-                      email: data.email,
-                    } as User);
-                  }
+            return onSnapshot(
+              q,
+              (snapshot) => {
+                const users = snapshot.docs.map((doc) => ({
+                  id: doc.id,
+                  ...doc.data(),
+                })) as User[];
+                setLeaderboard(users);
+              },
+              (error) => {
+                if (error.code === "failed-precondition") {
+                  console.log("Please wait while the index is being built...");
                 } else {
-                  // Handle entries without userId
-                  users.push({
-                    id: docSnapshot.id,
-                    name: data.name || "Anonymous",
-                    screenTime: data.screenTime,
-                    email: data.email,
-                  } as User);
+                  console.error("Leaderboard listener error:", error);
                 }
               }
+            );
+          };
 
-              setLeaderboard(users);
-            },
-            (error) => {
-              console.error("Leaderboard listener error:", error);
-            }
-          );
+          leaderboardUnsubscribe = setupLeaderboardListener();
         } catch (error) {
           console.error("Error setting up listeners:", error);
         }
       } else {
+        leaderboardUnsubscribe();
         setUser(null);
         setLeaderboard([]);
       }
     });
 
     return () => {
-      unsubscribe();
       leaderboardUnsubscribe();
+      unsubscribe();
     };
-  }, []);
+  }, [sortBy]); // Add sortBy to dependencies
 
   const handleRegister = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -253,17 +243,36 @@ export default function Home() {
       const userDoc = await getDoc(doc(db, "users", user.uid));
       const userData = userDoc.data();
 
-      const screenTimeData = {
+      // Get the current week's document ID (based on the start of the week - Saturday)
+      const now = new Date();
+      const startOfWeek = new Date(now);
+      startOfWeek.setDate(now.getDate() - ((now.getDay() + 1) % 7)); // Set to last Saturday
+      startOfWeek.setHours(0, 0, 0, 0);
+      const weekId = startOfWeek.toISOString().split("T")[0];
+
+      // Get or create weekly document
+      const weeklyDocRef = doc(db, "screenTime", `${user.uid}_${weekId}`);
+      const weeklyDoc = await getDoc(weeklyDocRef);
+      const currentWeeklyTime = weeklyDoc.exists()
+        ? weeklyDoc.data().weeklyTime
+        : 0;
+
+      // Update weekly time
+      await setDoc(weeklyDocRef, {
         userId: user.uid,
         name: userData?.name || user.name || user.displayName || "Anonymous",
         email: user.email,
-        screenTime: screenTime,
+        weeklyTime: currentWeeklyTime + screenTime,
         timestamp: new Date(),
-      };
+        weekStart: startOfWeek,
+      });
 
-      console.log("Submitting screen time:", screenTimeData); // Debug log
+      // Update total time in user document
+      const currentTotalTime = userData?.totalTime || 0;
+      await updateDoc(doc(db, "users", user.uid), {
+        totalTime: currentTotalTime + screenTime,
+      });
 
-      await addDoc(collection(db, "screenTime"), screenTimeData);
       setScreenTime(0);
     } catch (error: any) {
       console.error("Error submitting screen time:", error);
@@ -408,9 +417,33 @@ export default function Home() {
             </div>
 
             <div className="bg-blue-900/50 p-6 rounded-lg border-2 border-cyan-400/30">
-              <h2 className="text-2xl font-bold mb-6 text-center text-yellow-400">
-                HIGH SCORES
-              </h2>
+              <div className="flex justify-between items-center mb-6">
+                <h2 className="text-2xl font-bold text-yellow-400">
+                  HIGH SCORES
+                </h2>
+                <div className="flex space-x-4">
+                  <button
+                    onClick={() => setSortBy("weekly")}
+                    className={`px-4 py-2 rounded ${
+                      sortBy === "weekly"
+                        ? "bg-cyan-500 text-white shadow-lg shadow-cyan-500/50"
+                        : "bg-blue-800 text-cyan-300"
+                    }`}
+                  >
+                    Weekly
+                  </button>
+                  <button
+                    onClick={() => setSortBy("total")}
+                    className={`px-4 py-2 rounded ${
+                      sortBy === "total"
+                        ? "bg-cyan-500 text-white shadow-lg shadow-cyan-500/50"
+                        : "bg-blue-800 text-cyan-300"
+                    }`}
+                  >
+                    All Time
+                  </button>
+                </div>
+              </div>
               <div className="space-y-2">
                 {leaderboard.map((entry, index) => (
                   <div
@@ -428,7 +461,8 @@ export default function Home() {
                       </span>
                     </div>
                     <span className="text-lg text-yellow-400">
-                      {entry.screenTime}
+                      {sortBy === "weekly" ? entry.weeklyTime : entry.totalTime}{" "}
+                      minutes
                     </span>
                   </div>
                 ))}
