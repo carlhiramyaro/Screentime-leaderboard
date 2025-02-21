@@ -18,6 +18,8 @@ import {
   getDoc,
   updateDoc,
   where,
+  getDocs,
+  writeBatch,
 } from "firebase/firestore";
 import Image from "next/image";
 
@@ -27,6 +29,7 @@ interface User {
   email: string;
   weeklyTime: number;
   totalTime: number;
+  isAdmin?: boolean;
 }
 
 interface SettingsModalProps {
@@ -124,6 +127,7 @@ export default function Home() {
           setUser({
             ...authUser,
             name: userData?.name || authUser.displayName || "Anonymous",
+            isAdmin: userData?.isAdmin || false,
           });
 
           // Get current week ID
@@ -305,6 +309,33 @@ export default function Home() {
     }
   };
 
+  // Add admin reset function
+  const handleResetLeaderboard = async () => {
+    if (!user?.isAdmin) return;
+
+    try {
+      // Get all screenTime documents
+      const screenTimeSnapshot = await getDocs(collection(db, "screenTime"));
+      const batch = writeBatch(db);
+
+      // Delete all screenTime documents
+      screenTimeSnapshot.docs.forEach((doc) => {
+        batch.delete(doc.ref);
+      });
+
+      // Reset all users' totalTime to 0
+      const usersSnapshot = await getDocs(collection(db, "users"));
+      usersSnapshot.docs.forEach((doc) => {
+        batch.update(doc.ref, { totalTime: 0 });
+      });
+
+      await batch.commit();
+      console.log("Leaderboard reset successfully");
+    } catch (error) {
+      console.error("Error resetting leaderboard:", error);
+    }
+  };
+
   return (
     <div className="min-h-screen bg-gradient-to-b from-blue-900 to-blue-950 text-white p-4 md:p-8 font-mono">
       <div className="max-w-4xl mx-auto">
@@ -468,6 +499,20 @@ export default function Home() {
                 ))}
               </div>
             </div>
+
+            {user?.isAdmin && (
+              <div className="mt-8 bg-red-900/50 p-6 rounded-lg border-2 border-red-400/30">
+                <h2 className="text-xl font-bold text-red-400 mb-4">
+                  Admin Panel
+                </h2>
+                <button
+                  onClick={handleResetLeaderboard}
+                  className="bg-red-600 hover:bg-red-700 px-6 py-2 rounded shadow-lg shadow-red-500/30 text-white font-bold"
+                >
+                  Reset Leaderboard
+                </button>
+              </div>
+            )}
           </div>
         )}
 
